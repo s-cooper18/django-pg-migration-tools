@@ -308,8 +308,21 @@ class TestSaferRemoveIndexConcurrently:
 
     # Disable the overall test transaction because a concurrent index operation
     # cannot be triggered/tested inside of a transaction.
+    @pytest.mark.parametrize(
+        "table_name,table_name_without_app,index_name,create_index_query",
+        [
+            (
+                "example_app_charmodel",
+                "charmodel",
+                "char_field_idx",
+                'CREATE INDEX CONCURRENTLY IF NOT EXISTS "char_field_idx" ON "example_app_charmodel" ("char_field")',
+            )
+        ],
+    )
     @pytest.mark.django_db(transaction=True)
-    def test_remove(self):
+    def test_remove(
+        self, table_name, table_name_without_app, index_name, create_index_query
+    ):
         with connection.cursor() as cursor:
             # Set the lock_timeout to check it has been returned to
             # its original value once the index creation is completed.
@@ -319,7 +332,7 @@ class TestSaferRemoveIndexConcurrently:
         with connection.cursor() as cursor:
             cursor.execute(
                 _CHECK_INDEX_EXISTS_QUERY,
-                {"table_name": "example_app_charmodel", "index_name": "char_field_idx"},
+                {"table_name": table_name, "index_name": index_name},
             )
             assert cursor.fetchone()
 
@@ -329,22 +342,28 @@ class TestSaferRemoveIndexConcurrently:
 
         # Verify that the current state has the index we're about to delete.
         assert (
-            len(project_state.models[self.app_label, "charmodel"].options["indexes"])
+            len(
+                project_state.models[self.app_label, table_name_without_app].options[
+                    "indexes"
+                ]
+            )
             == 1
         )
         assert (
-            project_state.models[self.app_label, "charmodel"].options["indexes"][0].name
-            == "char_field_idx"
+            project_state.models[self.app_label, table_name_without_app]
+            .options["indexes"][0]
+            .name
+            == index_name
         )
 
         # Set the operation that will drop the index concurrently without lock
         # timeouts.
         operation = operations.SaferRemoveIndexConcurrently(
-            model_name="charmodel", name="char_field_idx"
+            model_name=table_name_without_app, name=index_name
         )
 
         assert operation.describe() == (
-            "Concurrently removes index char_field_idx on model charmodel "
+            f"Concurrently removes index {index_name} on model charmodel "
             "if the index exists. NOTE: Using django_pg_migration_tools "
             "SaferRemoveIndexConcurrently operation."
         )
@@ -352,14 +371,19 @@ class TestSaferRemoveIndexConcurrently:
         name, args, kwargs = operation.deconstruct()
         assert name == "SaferRemoveIndexConcurrently"
         assert args == []
-        assert kwargs == {"model_name": "charmodel", "name": "char_field_idx"}
+        assert kwargs == {"model_name": table_name_without_app, "name": index_name}
 
         # Verify that the index will be removed from the django project state
         # when we run the operation forwards. This is different from actually
         # removing the index from the db.
         operation.state_forwards(self.app_label, new_state)
         assert (
-            len(new_state.models[self.app_label, "charmodel"].options["indexes"]) == 0
+            len(
+                new_state.models[self.app_label, table_name_without_app].options[
+                    "indexes"
+                ]
+            )
+            == 0
         )
 
         # Proceed to remove the index:
@@ -373,7 +397,7 @@ class TestSaferRemoveIndexConcurrently:
         with connection.cursor() as cursor:
             cursor.execute(
                 _CHECK_INDEX_EXISTS_QUERY,
-                {"table_name": "example_app_charmodel", "index_name": "char_field_idx"},
+                {"table_name": table_name_without_app, "index_name": index_name},
             )
             assert cursor.fetchone() is None
 
@@ -385,7 +409,7 @@ class TestSaferRemoveIndexConcurrently:
         # Assert on the sequence of expected SQL queries:
         assert queries[0]["sql"] == "SHOW lock_timeout;"
         assert queries[1]["sql"] == "SET lock_timeout = '0';"
-        assert queries[2]["sql"] == 'DROP INDEX CONCURRENTLY IF EXISTS "char_field_idx"'
+        assert queries[2]["sql"] == f'DROP INDEX CONCURRENTLY IF EXISTS {index_name}"'
         assert queries[3]["sql"] == "SET lock_timeout = '1s';"
 
         # Reverse the migration to re-create the index and verify that the
@@ -398,19 +422,18 @@ class TestSaferRemoveIndexConcurrently:
 
         assert reverse_queries[0]["sql"] == "SHOW lock_timeout;"
         assert reverse_queries[1]["sql"] == "SET lock_timeout = '0';"
-        assert reverse_queries[2]["sql"] == dedent("""
+        assert reverse_queries[2]["sql"] == dedent(
+            f"""
             SELECT relname
             FROM pg_class, pg_index
             WHERE (
                 pg_index.indisvalid = false
                 AND pg_index.indexrelid = pg_class.oid
-                AND relname = 'char_field_idx'
+                AND relname = \'{index_name}\'
             );
-            """)
-        assert (
-            reverse_queries[3]["sql"]
-            == 'CREATE INDEX CONCURRENTLY IF NOT EXISTS "char_field_idx" ON "example_app_charmodel" ("char_field")'
+            """
         )
+        assert reverse_queries[3]["sql"] == create_index_query
         assert reverse_queries[4]["sql"] == "SET lock_timeout = '1s';"
 
     # Disable the overall test transaction because a concurrent index cannot
