@@ -177,6 +177,17 @@ class SafeConstraintOperationManager(base_operations.Operation):
             model=model,
             unique=True,
         )
+
+        if index.condition is not None:
+            """
+            Unique constraints with conditions do not exist in postgres.
+
+            As of writing Django handles these as unique indexes with conditions only
+            in the auto generated operation, so the step to turn the index into a constraint is
+            skipped here.
+            """
+            return
+
         # Django doesn't have a handy flag "using=..." so we need to alter the
         # SQL statement manually. We go from a SQL that looks like this:
         #
@@ -198,7 +209,10 @@ class SafeConstraintOperationManager(base_operations.Operation):
 
     def drop_constraint(
         self,
+        app_label: str,
         schema_editor: base_schema.BaseDatabaseSchemaEditor,
+        from_state: migrations.state.ProjectState,
+        to_state: migrations.state.ProjectState,
         model: type[models.Model],
         constraint: models.UniqueConstraint,
     ) -> None:
@@ -210,6 +224,20 @@ class SafeConstraintOperationManager(base_operations.Operation):
             return
 
         if not self._constraint_exists(schema_editor, constraint):
+            if constraint.condition is not None:
+                # If condition is present on the constraint, it would have been created
+                # as an index instead.
+                index = self._get_index_for_constraint(constraint)
+
+                SafeIndexOperationManager().safer_drop_index(
+                    app_label=app_label,
+                    schema_editor=schema_editor,
+                    from_state=from_state,
+                    to_state=to_state,
+                    index=index,
+                    model=model,
+                )
+
             # Nothing to delete.
             return
 
@@ -415,7 +443,10 @@ class SaferAddUniqueConstraint(operation_models.AddConstraint):
         to_state: migrations.state.ProjectState,
     ) -> None:
         SafeConstraintOperationManager().drop_constraint(
+            app_label=app_label,
             schema_editor=schema_editor,
+            from_state=from_state,
+            to_state=to_state,
             model=to_state.apps.get_model(app_label, self.model_name),
             constraint=self.constraint,
         )
@@ -450,7 +481,10 @@ class SaferRemoveUniqueConstraint(operation_models.RemoveConstraint):
         model = from_state.apps.get_model(app_label, self.model_name)
         from_model_state = from_state.models[app_label, self.model_name.lower()]
         SafeConstraintOperationManager().drop_constraint(
+            app_label=app_label,
             schema_editor=schema_editor,
+            from_state=from_state,
+            to_state=to_state,
             model=model,
             constraint=from_model_state.get_constraint_by_name(self.name),
         )
